@@ -388,19 +388,19 @@ void Vidyut::Evolve()
                 // order ions/neutrals as contiguous species
                 for (unsigned int ind = 0; ind < NUM_SPECIES; ind++)
                 {
-                    bool solveflag = true;
+                    bool transport_solve_flag = true;
                     auto it = std::find(
                         bg_specid_list.begin(), bg_specid_list.end(), ind);
-                    if (it != bg_specid_list.end())
-                    {
-                        solveflag = false;
-                    }
-                    if (ind == E_IDX)
-                    {
-                        solveflag = false;
-                    }
 
-                    if (solveflag)
+                    const bool is_background_species =
+                        (it != bg_specid_list.end());
+
+                    // transport solve is false if i am a background gas specie
+                    // or electrons - electrons solve done already
+                    transport_solve_flag =
+                        !(is_background_species || (ind == E_IDX));
+
+                    if (transport_solve_flag)
                     {
                         // ions
                         if (plasmachem::get_charge(ind) != 0)
@@ -428,7 +428,8 @@ void Vidyut::Evolve()
                                 neutral_bc_hi, grad_fc);
                         }
                     }
-                    if (do_bg_reactions)
+
+                    if (is_background_species && do_bg_reactions)
                     {
                         for (int ilev = 0; ilev <= finest_level; ilev++)
                         {
@@ -492,6 +493,8 @@ void Vidyut::Evolve()
                 }
                 if (NUM_NEUTRALS > 0)
                 {
+                    // NUM_NEUTRALS includes all species other than background
+                    // gas for which transport needn't be solved
                     int comp = FIRST_NEUTRAL;
                     for (comp = FIRST_NEUTRAL;
                          comp <=
@@ -526,41 +529,44 @@ void Vidyut::Evolve()
                             Sborder_old, expl_src, neutral_bc_lo, neutral_bc_hi,
                             grad_fc);
                     }
+                }
 
-                    for (unsigned int bgind = 0; bgind < bg_specid_list.size();
-                         bgind++)
+                // for background gas: always reset phi_new to phi_old to
+                // undo the transport solve (bg species density is
+                // prescribed/fixed). chemistry update only happens when
+                // do_bg_reactions is true.
+                for (unsigned int bgind = 0; bgind < bg_specid_list.size();
+                     bgind++)
+                {
+                    int ind = bg_specid_list[bgind];
+                    // reset phi_new
+                    for (int lev = 0; lev <= finest_level; lev++)
                     {
-                        int ind = bg_specid_list[bgind];
-                        // reset phi_new
-                        for (int lev = 0; lev <= finest_level; lev++)
+                        amrex::MultiFab::Copy(
+                            phi_new[lev], phi_old[lev], ind, ind, 1, 0);
+                    }
+                    if (do_bg_reactions)
+                    {
+                        for (int ilev = 0; ilev <= finest_level; ilev++)
                         {
-                            amrex::MultiFab::Copy(
-                                phi_new[lev], phi_old[lev], ind, ind, 1, 0);
-                        }
-                        if (do_bg_reactions)
-                        {
-                            for (int ilev = 0; ilev <= finest_level; ilev++)
-                            {
-                                amrex::Real minspecden = min_species_density;
-                                int boundspecden = bound_specden;
-                                auto phi_arrays = phi_new[ilev].arrays();
-                                auto rxn_arrays = rxn_src[ilev].arrays();
-                                amrex::ParallelFor(
-                                    phi_new[ilev],
-                                    [=] AMREX_GPU_DEVICE(
-                                        int nbx, int i, int j, int k) noexcept {
-                                        auto phi_arr = phi_arrays[nbx];
-                                        auto rxn_arr = rxn_arrays[nbx];
-                                        phi_arr(i, j, k, ind) +=
-                                            rxn_arr(i, j, k, ind) * dt_common;
-                                        if (phi_arr(i, j, k, ind) <
-                                                minspecden &&
-                                            boundspecden)
-                                        {
-                                            phi_arr(i, j, k, ind) = minspecden;
-                                        }
-                                    });
-                            }
+                            amrex::Real minspecden = min_species_density;
+                            int boundspecden = bound_specden;
+                            auto phi_arrays = phi_new[ilev].arrays();
+                            auto rxn_arrays = rxn_src[ilev].arrays();
+                            amrex::ParallelFor(
+                                phi_new[ilev],
+                                [=] AMREX_GPU_DEVICE(
+                                    int nbx, int i, int j, int k) noexcept {
+                                    auto phi_arr = phi_arrays[nbx];
+                                    auto rxn_arr = rxn_arrays[nbx];
+                                    phi_arr(i, j, k, ind) +=
+                                        rxn_arr(i, j, k, ind) * dt_common;
+                                    if (phi_arr(i, j, k, ind) < minspecden &&
+                                        boundspecden)
+                                    {
+                                        phi_arr(i, j, k, ind) = minspecden;
+                                    }
+                                });
                         }
                     }
                 }
